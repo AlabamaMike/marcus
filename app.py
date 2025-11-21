@@ -13,12 +13,17 @@ from google import genai
 from google.genai import types
 import gradio as gr
 import utils
+from session_manager import SessionManager
+
+# Initialize session manager
+session_manager = SessionManager()
 
 
 def generate(
     message,
     history: list[gr.ChatMessage],
-    request: gr.Request
+    request: gr.Request,
+    session_id: int = None
 ):
   """Function to call the model based on the request."""
 
@@ -26,6 +31,10 @@ def generate(
   if validate_key_result is not None:
     yield validate_key_result
     return
+
+  # Save user message to database if session_id exists
+  if session_id and message:
+    session_manager.save_message(session_id, "user", message)
 
   client = genai.Client(
       vertexai=True,
@@ -175,6 +184,7 @@ Remember: You are not providing therapy or medical advice, but philosophical gui
   )
 
   results = []
+  full_response = []  # Track full response for saving to database
   for chunk in client.models.generate_content_stream(
       model=model,
       contents=contents,
@@ -184,25 +194,184 @@ Remember: You are not providing therapy or medical advice, but philosophical gui
       results.extend(
           utils.convert_content_to_gr_type(chunk.candidates[0].content)
       )
+      full_response.extend(
+          utils.convert_content_to_gr_type(chunk.candidates[0].content)
+      )
       if results:
         yield results
 
+  # Save assistant's response to database if session_id exists
+  if session_id and full_response:
+    # Convert response to format suitable for storage
+    response_content = {"text": " ".join([str(r) for r in full_response if isinstance(r, str)])}
+    session_manager.save_message(session_id, "model", response_content)
+
+    # Auto-generate title from first message if this is a new session
+    session = session_manager.get_session(session_id)
+    if session and session['title'].startswith("New Chat"):
+      session_manager.generate_title_from_first_message(session_id)
+
+def load_session_history(session_id: int):
+  """Load chat history for a specific session."""
+  if not session_id:
+    return []
+
+  messages = session_manager.get_messages(session_id)
+  # Convert to Gradio ChatMessage format
+  history = []
+  for msg in messages:
+    history.append({
+      "role": msg["role"],
+      "content": msg["content"]
+    })
+  return history
+
+
+def create_new_session():
+  """Create a new chat session."""
+  session_id = session_manager.create_session()
+  sessions = session_manager.get_all_sessions()
+  session_choices = [(f"{s['title']}", s['id']) for s in sessions]
+  return session_id, session_choices, []
+
+
+def switch_session(session_id: int):
+  """Switch to a different session."""
+  if not session_id:
+    return []
+  history = load_session_history(session_id)
+  return history
+
+
+def delete_current_session(session_id: int):
+  """Delete the current session."""
+  if session_id:
+    session_manager.delete_session(session_id)
+
+  # Create a new session after deletion
+  new_session_id = session_manager.create_session()
+  sessions = session_manager.get_all_sessions()
+  session_choices = [(f"{s['title']}", s['id']) for s in sessions]
+  return new_session_id, session_choices, []
+
+
+def format_session_list():
+  """Format the session list for display in the sidebar."""
+  sessions = session_manager.get_all_sessions()
+  if not sessions:
+    return [(f"New Chat", 0)]
+  return [(f"{s['title']}", s['id']) for s in sessions]
+
+
+# Create initial session if none exists
+initial_sessions = session_manager.get_all_sessions()
+if not initial_sessions:
+  initial_session_id = session_manager.create_session()
+else:
+  initial_session_id = initial_sessions[0]['id']
+
+
 with gr.Blocks(theme=utils.custom_theme) as demo:
+  # Hidden state to track current session
+  current_session = gr.State(value=initial_session_id)
+
   with gr.Row():
     gr.HTML(utils.public_access_warning)
+
   with gr.Row():
-    with gr.Column(scale=1):
+    # Left sidebar for session history
+    with gr.Column(scale=1, min_width=250):
       with gr.Row():
         gr.HTML("<h2>I am Marcus</h2>")
       with gr.Row():
-        gr.HTML("""I know that I know nothing.""")
-      
+        gr.HTML("""<p style='font-style: italic; color: #666;'>I know that I know nothing.</p>""")
 
-    with gr.Column(scale=2, variant="panel"):
-      gr.ChatInterface(
-          fn=generate,
-          title="Marcus",
-          type="messages",
-          multimodal=True,
+      with gr.Row():
+        new_chat_btn = gr.Button("➕ New Chat", variant="primary", size="sm")
+
+      with gr.Row():
+        gr.HTML("<h3 style='margin-top: 20px; margin-bottom: 10px;'>Chat History</h3>")
+
+      session_dropdown = gr.Dropdown(
+        choices=format_session_list(),
+        value=initial_session_id,
+        label="Sessions",
+        interactive=True,
+        container=True
       )
+
+      with gr.Row():
+        delete_btn = gr.Button("🗑️ Delete Current Chat", variant="stop", size="sm")
+
+    # Main chat interface
+    with gr.Column(scale=3, variant="panel"):
+      chatbot = gr.Chatbot(
+        label="Marcus",
+        type="messages",
+        height=600
+      )
+      chat_input = gr.MultimodalTextbox(
+        interactive=True,
+        file_types=["image"],
+        placeholder="Type a message...",
+        show_label=False
+      )
+
+  # Event handlers
+  def submit_message(message, history, session_id, request: gr.Request):
+    """Handle message submission."""
+    # Add user message to display immediately
+    if message:
+      user_msg = {"role": "user", "content": message}
+      history.append(user_msg)
+
+      # Generate response
+      for response in generate(message, history, request, session_id):
+        # Update with assistant response
+        assistant_msg = {"role": "assistant", "content": response}
+        yield history + [assistant_msg], session_id
+
+      # Refresh session list to show updated title
+      yield history, session_id
+
+
+  chat_input.submit(
+    fn=submit_message,
+    inputs=[chat_input, chatbot, current_session],
+    outputs=[chatbot, current_session]
+  ).then(
+    fn=lambda: None,
+    inputs=None,
+    outputs=chat_input
+  ).then(
+    fn=lambda: format_session_list(),
+    inputs=None,
+    outputs=session_dropdown
+  )
+
+  # New chat button
+  new_chat_btn.click(
+    fn=create_new_session,
+    inputs=None,
+    outputs=[current_session, session_dropdown, chatbot]
+  )
+
+  # Session switching
+  session_dropdown.change(
+    fn=switch_session,
+    inputs=[session_dropdown],
+    outputs=[chatbot]
+  ).then(
+    fn=lambda x: x,
+    inputs=[session_dropdown],
+    outputs=[current_session]
+  )
+
+  # Delete session
+  delete_btn.click(
+    fn=delete_current_session,
+    inputs=[current_session],
+    outputs=[current_session, session_dropdown, chatbot]
+  )
+
   demo.launch(show_error=True)
