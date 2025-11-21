@@ -42,6 +42,19 @@ class SessionManager:
                 )
             """)
 
+            # Create tool_preferences table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tool_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    web_search_enabled BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+                    UNIQUE(session_id)
+                )
+            """)
+
             conn.commit()
 
     def create_session(self, title: Optional[str] = None) -> int:
@@ -243,3 +256,70 @@ class SessionManager:
             return title
 
         return None
+
+    def get_tool_preferences(self, session_id: int) -> Dict:
+        """Get tool preferences for a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            Dictionary with tool preferences (web_search_enabled, etc.)
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT web_search_enabled FROM tool_preferences WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                return {
+                    'web_search_enabled': bool(row[0])
+                }
+            else:
+                # Create default preferences if they don't exist
+                self._create_default_tool_preferences(session_id)
+                return {
+                    'web_search_enabled': True
+                }
+
+    def _create_default_tool_preferences(self, session_id: int):
+        """Create default tool preferences for a session.
+
+        Args:
+            session_id: The ID of the session.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO tool_preferences (session_id, web_search_enabled) VALUES (?, ?)",
+                (session_id, True)
+            )
+            conn.commit()
+
+    def update_tool_preferences(self, session_id: int, web_search_enabled: bool) -> bool:
+        """Update tool preferences for a session.
+
+        Args:
+            session_id: The ID of the session.
+            web_search_enabled: Whether web search is enabled.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """INSERT INTO tool_preferences (session_id, web_search_enabled, updated_at)
+                       VALUES (?, ?, CURRENT_TIMESTAMP)
+                       ON CONFLICT(session_id)
+                       DO UPDATE SET web_search_enabled = ?, updated_at = CURRENT_TIMESTAMP""",
+                    (session_id, web_search_enabled, web_search_enabled)
+                )
+                conn.commit()
+                return True
+        except Exception:
+            return False

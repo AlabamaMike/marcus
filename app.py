@@ -23,7 +23,8 @@ def generate(
     message,
     history: list[gr.ChatMessage],
     request: gr.Request,
-    session_id: int = None
+    session_id: int = None,
+    web_search_enabled: bool = True
 ):
   """Function to call the model based on the request."""
 
@@ -154,9 +155,11 @@ Remember: You are not providing therapy or medical advice, but philosophical gui
         types.Content(role="user", parts=utils.get_parts_from_message(message))
     )
 
-  tools = [
-      types.Tool(google_search=types.GoogleSearch()),
-  ]
+  # Conditionally add tools based on preferences
+  tools = []
+  if web_search_enabled:
+    tools.append(types.Tool(google_search=types.GoogleSearch()))
+
   generate_content_config = types.GenerateContentConfig(
       temperature=1,
       top_p=0.95,
@@ -179,7 +182,7 @@ Remember: You are not providing therapy or medical advice, but philosophical gui
               threshold="OFF"
           )
       ],
-      tools=tools,
+      tools=tools if tools else None,
       system_instruction=[si_text1],
   )
 
@@ -230,17 +233,21 @@ def load_session_history(session_id: int):
 def create_new_session():
   """Create a new chat session."""
   session_id = session_manager.create_session()
+  # Create default tool preferences for new session
+  session_manager._create_default_tool_preferences(session_id)
   sessions = session_manager.get_all_sessions()
   session_choices = [(f"{s['title']}", s['id']) for s in sessions]
-  return session_id, session_choices, []
+  return session_id, session_choices, [], True  # Default web search to True
 
 
 def switch_session(session_id: int):
   """Switch to a different session."""
   if not session_id:
-    return []
+    return [], True
   history = load_session_history(session_id)
-  return history
+  # Load tool preferences for this session
+  preferences = session_manager.get_tool_preferences(session_id)
+  return history, preferences['web_search_enabled']
 
 
 def delete_current_session(session_id: int):
@@ -250,9 +257,18 @@ def delete_current_session(session_id: int):
 
   # Create a new session after deletion
   new_session_id = session_manager.create_session()
+  # Create default tool preferences for new session
+  session_manager._create_default_tool_preferences(new_session_id)
   sessions = session_manager.get_all_sessions()
   session_choices = [(f"{s['title']}", s['id']) for s in sessions]
-  return new_session_id, session_choices, []
+  return new_session_id, session_choices, [], True  # Default web search to True
+
+
+def save_tool_preferences(session_id: int, web_search_enabled: bool):
+  """Save tool preferences for the current session."""
+  if session_id:
+    session_manager.update_tool_preferences(session_id, web_search_enabled)
+  return web_search_enabled
 
 
 def format_session_list():
@@ -286,6 +302,16 @@ with gr.Blocks(theme=utils.custom_theme) as demo:
       with gr.Row():
         new_chat_btn = gr.Button("➕ New Chat", variant="primary", size="sm")
 
+      # Tools settings section
+      with gr.Accordion("⚙️ Tools & Settings", open=False):
+        gr.HTML("<p style='margin-bottom: 10px; font-size: 14px;'>Configure which tools are available:</p>")
+        web_search_toggle = gr.Checkbox(
+          label="Web Search",
+          value=True,
+          info="Enable Google Search for real-time information",
+          interactive=True
+        )
+
       with gr.Row():
         gr.HTML("<h3 style='margin-top: 20px; margin-bottom: 10px;'>Chat History</h3>")
 
@@ -315,15 +341,15 @@ with gr.Blocks(theme=utils.custom_theme) as demo:
       )
 
   # Event handlers
-  def submit_message(message, history, session_id, request: gr.Request):
+  def submit_message(message, history, session_id, web_search_enabled, request: gr.Request):
     """Handle message submission."""
     # Add user message to display immediately
     if message:
       user_msg = {"role": "user", "content": message}
       history.append(user_msg)
 
-      # Generate response
-      for response in generate(message, history, request, session_id):
+      # Generate response with current tool preferences
+      for response in generate(message, history, request, session_id, web_search_enabled):
         # Update with assistant response
         assistant_msg = {"role": "assistant", "content": response}
         yield history + [assistant_msg], session_id
@@ -334,7 +360,7 @@ with gr.Blocks(theme=utils.custom_theme) as demo:
 
   chat_input.submit(
     fn=submit_message,
-    inputs=[chat_input, chatbot, current_session],
+    inputs=[chat_input, chatbot, current_session, web_search_toggle],
     outputs=[chatbot, current_session]
   ).then(
     fn=lambda: None,
@@ -350,25 +376,32 @@ with gr.Blocks(theme=utils.custom_theme) as demo:
   new_chat_btn.click(
     fn=create_new_session,
     inputs=None,
-    outputs=[current_session, session_dropdown, chatbot]
+    outputs=[current_session, session_dropdown, chatbot, web_search_toggle]
   )
 
   # Session switching
   session_dropdown.change(
     fn=switch_session,
     inputs=[session_dropdown],
-    outputs=[chatbot]
+    outputs=[chatbot, web_search_toggle]
   ).then(
     fn=lambda x: x,
     inputs=[session_dropdown],
     outputs=[current_session]
   )
 
+  # Tool preferences change handler
+  web_search_toggle.change(
+    fn=save_tool_preferences,
+    inputs=[current_session, web_search_toggle],
+    outputs=[web_search_toggle]
+  )
+
   # Delete session
   delete_btn.click(
     fn=delete_current_session,
     inputs=[current_session],
-    outputs=[current_session, session_dropdown, chatbot]
+    outputs=[current_session, session_dropdown, chatbot, web_search_toggle]
   )
 
   demo.launch(show_error=True)
