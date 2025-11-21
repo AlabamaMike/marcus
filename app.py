@@ -276,9 +276,6 @@ with gr.Blocks(theme=utils.custom_theme) as demo:
   current_session = gr.State(value=initial_session_id)
 
   with gr.Row():
-    gr.HTML(utils.public_access_warning)
-
-  with gr.Row():
     # Left sidebar for session history
     with gr.Column(scale=1, min_width=250):
       with gr.Row():
